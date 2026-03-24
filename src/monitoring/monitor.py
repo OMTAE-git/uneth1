@@ -1,13 +1,14 @@
 """
 Compliance Monitoring Module
-Periodically checks websites for ADA compliance changes
+Periodically checks websites for ADA compliance changes with proper error handling and logging.
 """
 
+import json
 import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import schedule
 from dotenv import load_dotenv
@@ -17,306 +18,644 @@ load_dotenv()
 from src.scrapers.compliance_checker import ADAComplianceChecker
 from src.reports.report_generator import ReportGenerator
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
+class DatabaseError(Exception):
+    """Custom exception for database operations."""
+
+    pass
+
+
+class SiteNotFoundError(Exception):
+    """Custom exception when a site is not found in the database."""
+
+    pass
+
+
 class ComplianceMonitor:
-    DB_PATH = os.path.join(
-        os.path.dirname(__file__), "..", "..", "data", "compliance.db"
-    )
+    """
+    Monitors websites for ADA compliance over time.
 
-    def __init__(self):
-        self.init_database()
-        self.report_gen = ReportGenerator()
+    Features:
+    - Track multiple websites
+    - Store compliance history
+    - Detect status changes
+    - Generate notifications
+    - Schedule periodic checks
+    """
 
-    def init_database(self):
-        os.makedirs(os.path.dirname(self.DB_PATH), exist_ok=True)
-        conn = sqlite3.connect(self.DB_PATH)
-        cursor = conn.cursor()
+    def __init__(self, database_path: Optional[str] = None) -> None:
+        """
+        Initialize the compliance monitor.
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS monitored_sites (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT UNIQUE NOT NULL,
-                name TEXT,
-                email TEXT,
-                last_checked DATETIME,
-                last_issue_count INTEGER,
-                last_status TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        Args:
+            database_path: Optional custom database path
+        """
+        if database_path:
+            self.database_path = database_path
+        else:
+            current_dir = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             )
-        """)
+            self.database_path = os.path.join(current_dir, "data", "compliance.db")
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS compliance_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                site_id INTEGER,
-                checked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                issue_count INTEGER,
-                high_issues INTEGER,
-                medium_issues INTEGER,
-                low_issues INTEGER,
-                report_json TEXT,
-                status TEXT,
-                FOREIGN KEY (site_id) REFERENCES monitored_sites (id)
-            )
-        """)
+        self.report_generator = ReportGenerator()
+        self._initialize_database()
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS notifications (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                site_id INTEGER,
-                sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                notification_type TEXT,
-                message TEXT,
-                sent BOOLEAN DEFAULT 0,
-                FOREIGN KEY (site_id) REFERENCES monitored_sites (id)
-            )
-        """)
-
-        conn.commit()
-        conn.close()
-
-    def add_site(self, url: str, name: str = None, email: str = None) -> int:
-        conn = sqlite3.connect(self.DB_PATH)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO monitored_sites (url, name, email)
-            VALUES (?, ?, ?)
-        """,
-            (url, name, email),
+        logger.info(
+            f"Initialized ComplianceMonitor with database: {self.database_path}"
         )
 
-        site_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
+    def _get_database_connection(self) -> sqlite3.Connection:
+        """
+        Get a database connection with row factory.
 
-        logger.info(f"Added site to monitoring: {url}")
-        return site_id
+        Returns:
+            SQLite database connection
+        """
+        try:
+            connection = sqlite3.connect(self.database_path)
+            connection.row_factory = sqlite3.Row
+            return connection
+        except sqlite3.Error as database_error:
+            logger.error(f"Database connection error: {database_error}")
+            raise DatabaseError(f"Failed to connect to database: {database_error}")
 
-    def remove_site(self, url: str):
-        conn = sqlite3.connect(self.DB_PATH)
-        cursor = conn.cursor()
+    def _initialize_database(self) -> None:
+        """Create database tables if they don't exist."""
+        try:
+            os.makedirs(os.path.dirname(self.database_path), exist_ok=True)
+            connection = self._get_database_connection()
+            cursor = connection.cursor()
 
-        cursor.execute("SELECT id FROM monitored_sites WHERE url = ?", (url,))
-        result = cursor.fetchone()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS monitored_sites (
+                    site_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    website_url TEXT UNIQUE NOT NULL,
+                    site_name TEXT,
+                    contact_email TEXT,
+                    last_checked_at DATETIME,
+                    last_issue_count INTEGER,
+                    last_status TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        if result:
-            site_id = result[0]
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS compliance_history (
+                    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    site_id INTEGER,
+                    checked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    total_issue_count INTEGER,
+                    high_issue_count INTEGER,
+                    medium_issue_count INTEGER,
+                    low_issue_count INTEGER,
+                    full_report_json TEXT,
+                    compliance_status TEXT,
+                    FOREIGN KEY (site_id) REFERENCES monitored_sites (site_id)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS notifications (
+                    notification_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    site_id INTEGER,
+                    sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    notification_type TEXT,
+                    message_content TEXT,
+                    is_sent BOOLEAN DEFAULT 0,
+                    FOREIGN KEY (site_id) REFERENCES monitored_sites (site_id)
+                )
+            """)
+
+            connection.commit()
+            connection.close()
+
+            logger.info("Database initialized successfully")
+
+        except DatabaseError as database_error:
+            logger.error(f"Failed to initialize database: {database_error}")
+            raise
+        except Exception as unexpected_error:
+            logger.error(f"Unexpected error initializing database: {unexpected_error}")
+            raise
+
+    def add_site(
+        self,
+        website_url: str,
+        site_name: Optional[str] = None,
+        contact_email: Optional[str] = None,
+    ) -> int:
+        """
+        Add a website to the monitoring list.
+
+        Args:
+            website_url: URL of the website to monitor
+            site_name: Optional name for the site
+            contact_email: Optional contact email
+
+        Returns:
+            Site ID of the added site
+        """
+        try:
+            logger.info(f"Adding site to monitoring: {website_url}")
+
+            connection = self._get_database_connection()
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO monitored_sites 
+                (website_url, site_name, contact_email)
+                VALUES (?, ?, ?)
+            """,
+                (website_url, site_name, contact_email),
+            )
+
+            site_id = cursor.lastrowid
+            connection.commit()
+            connection.close()
+
+            logger.info(f"Successfully added site with ID: {site_id}")
+            return site_id
+
+        except sqlite3.IntegrityError:
+            logger.warning(f"Site already exists: {website_url}")
+            return self.get_site_id(website_url)
+        except DatabaseError as database_error:
+            logger.error(f"Database error adding site: {database_error}")
+            raise
+        except Exception as unexpected_error:
+            logger.error(f"Error adding site: {unexpected_error}")
+            raise
+
+    def get_site_id(self, website_url: str) -> int:
+        """
+        Get the site ID for a website URL.
+
+        Args:
+            website_url: URL of the website
+
+        Returns:
+            Site ID
+
+        Raises:
+            SiteNotFoundError: If site is not found
+        """
+        try:
+            connection = self._get_database_connection()
+            cursor = connection.cursor()
+
+            cursor.execute(
+                "SELECT site_id FROM monitored_sites WHERE website_url = ?",
+                (website_url,),
+            )
+            result = cursor.fetchone()
+            connection.close()
+
+            if result:
+                return result["site_id"]
+            else:
+                raise SiteNotFoundError(f"Site not found: {website_url}")
+
+        except SiteNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting site ID: {e}")
+            raise
+
+    def remove_site(self, website_url: str) -> bool:
+        """
+        Remove a website from monitoring.
+
+        Args:
+            website_url: URL of the website to remove
+
+        Returns:
+            True if removed, False if not found
+        """
+        try:
+            logger.info(f"Removing site from monitoring: {website_url}")
+
+            connection = self._get_database_connection()
+            cursor = connection.cursor()
+
+            site_id = self.get_site_id(website_url)
+
             cursor.execute(
                 "DELETE FROM compliance_history WHERE site_id = ?", (site_id,)
             )
             cursor.execute("DELETE FROM notifications WHERE site_id = ?", (site_id,))
-            cursor.execute("DELETE FROM monitored_sites WHERE id = ?", (site_id,))
-            conn.commit()
-            logger.info(f"Removed site from monitoring: {url}")
-        else:
-            logger.warning(f"Site not found: {url}")
+            cursor.execute("DELETE FROM monitored_sites WHERE site_id = ?", (site_id,))
 
-        conn.close()
+            connection.commit()
+            connection.close()
 
-    def check_site(self, url: str) -> Optional[Dict]:
-        try:
-            checker = ADAComplianceChecker(url)
-            if checker.run_checks():
-                report = checker.get_report()
-                self.save_check_result(url, report)
-                return report
-            return None
+            logger.info(f"Successfully removed site: {website_url}")
+            return True
+
+        except SiteNotFoundError:
+            logger.warning(f"Site not found for removal: {website_url}")
+            return False
         except Exception as e:
-            logger.error(f"Error checking site {url}: {e}")
+            logger.error(f"Error removing site: {e}")
+            return False
+
+    def check_single_site(self, website_url: str) -> Optional[Dict[str, Any]]:
+        """
+        Check a single website for compliance.
+
+        Args:
+            website_url: URL of the website to check
+
+        Returns:
+            Compliance report dictionary or None if failed
+        """
+        try:
+            logger.info(f"Checking site: {website_url}")
+
+            checker = ADAComplianceChecker(website_url)
+
+            if checker.run_all_checks():
+                report = checker.generate_report()
+
+                report_dict = {
+                    "url": report.url,
+                    "total_issues": report.total_issues,
+                    "severity_counts": {
+                        "High": report.high_issues,
+                        "Medium": report.medium_issues,
+                        "Low": report.low_issues,
+                    },
+                    "issues": report.issues,
+                }
+
+                self._save_check_result(website_url, report_dict)
+                logger.info(f"Check complete: {report.total_issues} issues found")
+                return report_dict
+            else:
+                logger.warning(f"Failed to check site: {website_url}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error checking site {website_url}: {e}")
             return None
 
-    def save_check_result(self, url: str, report: Dict):
-        conn = sqlite3.connect(self.DB_PATH)
-        cursor = conn.cursor()
+    def _save_check_result(self, website_url: str, report: Dict[str, Any]) -> None:
+        """
+        Save a compliance check result to the database.
 
-        cursor.execute("SELECT id FROM monitored_sites WHERE url = ?", (url,))
-        result = cursor.fetchone()
+        Args:
+            website_url: URL of the website
+            report: Compliance report dictionary
+        """
+        try:
+            site_id = self.get_site_id(website_url)
+            severity_counts = report.get("severity_counts", {})
 
-        if result:
-            site_id = result[0]
-            severity = report["severity_counts"]
+            connection = self._get_database_connection()
+            cursor = connection.cursor()
 
             cursor.execute(
                 """
                 INSERT INTO compliance_history 
-                (site_id, issue_count, high_issues, medium_issues, low_issues, report_json, status)
+                (site_id, total_issue_count, high_issue_count, medium_issue_count, low_issue_count, full_report_json, compliance_status)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     site_id,
                     report["total_issues"],
-                    severity["High"],
-                    severity["Medium"],
-                    severity["Low"],
-                    str(report),
-                    "improved" if report["total_issues"] == 0 else "issues_found",
+                    severity_counts.get("High", 0),
+                    severity_counts.get("Medium", 0),
+                    severity_counts.get("Low", 0),
+                    json.dumps(report),
+                    "compliant" if report["total_issues"] == 0 else "non_compliant",
                 ),
             )
 
             cursor.execute(
                 """
                 UPDATE monitored_sites 
-                SET last_checked = ?, last_issue_count = ?, last_status = ?
-                WHERE id = ?
+                SET last_checked_at = ?, last_issue_count = ?, last_status = ?
+                WHERE site_id = ?
             """,
-                (datetime.now(), report["total_issues"], "issues_found", site_id),
+                (
+                    datetime.now(),
+                    report["total_issues"],
+                    "compliant" if report["total_issues"] == 0 else "non_compliant",
+                    site_id,
+                ),
             )
 
-            conn.commit()
+            connection.commit()
+            connection.close()
 
-        conn.close()
+            logger.debug(f"Saved check result for site ID: {site_id}")
 
-    def get_site_history(self, url: str, days: int = 30) -> List[Dict]:
-        conn = sqlite3.connect(self.DB_PATH)
-        cursor = conn.cursor()
+        except SiteNotFoundError:
+            logger.warning(f"Cannot save result - site not registered: {website_url}")
+        except Exception as e:
+            logger.error(f"Error saving check result: {e}")
 
-        cursor.execute(
-            """
-            SELECT s.id, s.url, h.checked_at, h.issue_count, h.high_issues, 
-                   h.medium_issues, h.low_issues, h.status
-            FROM monitored_sites s
-            JOIN compliance_history h ON s.id = h.site_id
-            WHERE s.url = ? AND h.checked_at > datetime('now', '-' || ? || ' days')
-            ORDER BY h.checked_at DESC
-        """,
-            (url, days),
-        )
+    def get_site_history(
+        self, website_url: str, days: int = 30
+    ) -> List[Dict[str, Any]]:
+        """
+        Get compliance history for a site.
 
-        rows = cursor.fetchall()
-        conn.close()
+        Args:
+            website_url: URL of the website
+            days: Number of days of history to retrieve
 
-        return [
-            {
-                "url": row[1],
-                "checked_at": row[2],
-                "total_issues": row[3],
-                "high_issues": row[4],
-                "medium_issues": row[5],
-                "low_issues": row[6],
-                "status": row[7],
-            }
-            for row in rows
-        ]
+        Returns:
+            List of historical check results
+        """
+        try:
+            logger.info(f"Retrieving history for {website_url} (last {days} days)")
 
-    def get_all_monitored_sites(self) -> List[Dict]:
-        conn = sqlite3.connect(self.DB_PATH)
-        cursor = conn.cursor()
+            connection = self._get_database_connection()
+            cursor = connection.cursor()
 
-        cursor.execute("""
-            SELECT id, url, name, email, last_checked, last_issue_count, last_status
-            FROM monitored_sites
-            ORDER BY last_checked DESC
-        """)
+            cursor.execute(
+                """
+                SELECT 
+                    s.site_id,
+                    s.website_url,
+                    h.checked_at,
+                    h.total_issue_count,
+                    h.high_issue_count,
+                    h.medium_issue_count,
+                    h.low_issue_count,
+                    h.compliance_status
+                FROM monitored_sites s
+                JOIN compliance_history h ON s.site_id = h.site_id
+                WHERE s.website_url = ? 
+                AND h.checked_at > datetime('now', '-' || ? || ' days')
+                ORDER BY h.checked_at DESC
+            """,
+                (website_url, days),
+            )
 
-        rows = cursor.fetchall()
-        conn.close()
+            rows = cursor.fetchall()
+            connection.close()
 
-        return [
-            {
-                "id": row[0],
-                "url": row[1],
-                "name": row[2],
-                "email": row[3],
-                "last_checked": row[4],
-                "issue_count": row[5],
-                "status": row[6],
-            }
-            for row in rows
-        ]
+            history = [
+                {
+                    "site_id": row["site_id"],
+                    "url": row["website_url"],
+                    "checked_at": row["checked_at"],
+                    "total_issues": row["total_issue_count"],
+                    "high_issues": row["high_issue_count"],
+                    "medium_issues": row["medium_issue_count"],
+                    "low_issues": row["low_issue_count"],
+                    "status": row["compliance_status"],
+                }
+                for row in rows
+            ]
 
-    def check_all_sites(self) -> List[Dict]:
-        sites = self.get_all_monitored_sites()
-        results = []
+            logger.info(f"Retrieved {len(history)} history records")
+            return history
 
-        for site in sites:
-            logger.info(f"Checking site: {site['url']}")
-            report = self.check_site(site["url"])
-            if report:
-                results.append({"url": site["url"], "report": report})
+        except Exception as e:
+            logger.error(f"Error retrieving site history: {e}")
+            return []
 
-        return results
+    def get_all_monitored_sites(self) -> List[Dict[str, Any]]:
+        """
+        Get all monitored sites.
 
-    def get_status_changes(self, days: int = 7) -> List[Dict]:
-        conn = sqlite3.connect(self.DB_PATH)
-        cursor = conn.cursor()
+        Returns:
+            List of monitored site information
+        """
+        try:
+            connection = self._get_database_connection()
+            cursor = connection.cursor()
 
-        cursor.execute(
-            """
-            SELECT s.url, s.name, s.last_checked, s.last_issue_count,
-                   h.issue_count as previous_count
-            FROM monitored_sites s
-            JOIN (
-                SELECT site_id, issue_count
-                FROM compliance_history
-                WHERE checked_at < datetime('now', '-' || 1 || ' days')
-                AND checked_at > datetime('now', '-' || ? || ' days')
-            ) h ON s.id = h.site_id
-            WHERE s.last_issue_count != h.issue_count
-        """,
-            (days,),
-        )
+            cursor.execute("""
+                SELECT 
+                    site_id, 
+                    website_url, 
+                    site_name, 
+                    contact_email, 
+                    last_checked_at, 
+                    last_issue_count, 
+                    last_status
+                FROM monitored_sites
+                ORDER BY last_checked_at DESC
+            """)
 
-        rows = cursor.fetchall()
-        conn.close()
+            rows = cursor.fetchall()
+            connection.close()
 
-        return [
-            {
-                "url": row[0],
-                "name": row[1],
-                "last_checked": row[2],
-                "current_count": row[3],
-                "previous_count": row[4],
-                "change": row[3] - row[4],
-            }
-            for row in rows
-        ]
+            sites = [
+                {
+                    "site_id": row["site_id"],
+                    "url": row["website_url"],
+                    "name": row["site_name"],
+                    "email": row["contact_email"],
+                    "last_checked": row["last_checked_at"],
+                    "issue_count": row["last_issue_count"],
+                    "status": row["last_status"],
+                }
+                for row in rows
+            ]
+
+            logger.info(f"Retrieved {len(sites)} monitored sites")
+            return sites
+
+        except Exception as e:
+            logger.error(f"Error retrieving monitored sites: {e}")
+            return []
+
+    def check_all_sites(self) -> List[Dict[str, Any]]:
+        """
+        Check all monitored sites for compliance.
+
+        Returns:
+            List of check results for all sites
+        """
+        try:
+            sites = self.get_all_monitored_sites()
+            logger.info(f"Checking all {len(sites)} monitored sites")
+
+            results = []
+            for site in sites:
+                website_url = site["url"]
+                report = self.check_single_site(website_url)
+
+                if report:
+                    results.append({"url": website_url, "report": report})
+
+            logger.info(f"Completed checks for {len(results)} sites")
+            return results
+
+        except Exception as e:
+            logger.error(f"Error checking all sites: {e}")
+            return []
+
+    def get_status_changes(self, days: int = 7) -> List[Dict[str, Any]]:
+        """
+        Get sites with status changes in the specified period.
+
+        Args:
+            days: Number of days to look back
+
+        Returns:
+            List of sites with status changes
+        """
+        try:
+            connection = self._get_database_connection()
+            cursor = connection.cursor()
+
+            cursor.execute(
+                """
+                SELECT 
+                    s.website_url,
+                    s.site_name,
+                    s.last_checked_at,
+                    s.last_issue_count as current_count,
+                    previous_check.issue_count as previous_count
+                FROM monitored_sites s
+                JOIN (
+                    SELECT 
+                        site_id, 
+                        total_issue_count as issue_count,
+                        checked_at
+                    FROM compliance_history
+                    WHERE checked_at < datetime('now', '-1 days')
+                    AND checked_at > datetime('now', '-' || ? || ' days')
+                ) previous_check ON s.site_id = previous_check.site_id
+                WHERE s.last_issue_count != previous_check.issue_count
+            """,
+                (days,),
+            )
+
+            rows = cursor.fetchall()
+            connection.close()
+
+            changes = [
+                {
+                    "url": row["website_url"],
+                    "name": row["site_name"],
+                    "last_checked": row["last_checked_at"],
+                    "current_count": row["current_count"],
+                    "previous_count": row["previous_count"],
+                    "change": row["current_count"] - row["previous_count"],
+                }
+                for row in rows
+            ]
+
+            logger.info(f"Found {len(changes)} sites with status changes")
+            return changes
+
+        except Exception as e:
+            logger.error(f"Error getting status changes: {e}")
+            return []
 
 
-def run_monitor_job():
-    monitor = ComplianceMonitor()
-    results = monitor.check_all_sites()
-    logger.info(f"Monitored {len(results)} sites")
+def run_monitor_job() -> None:
+    """Job function for scheduled monitoring."""
+    try:
+        logger.info("Starting scheduled monitoring job")
+        monitor = ComplianceMonitor()
+        results = monitor.check_all_sites()
+        logger.info(f"Scheduled job complete. Checked {len(results)} sites")
+    except Exception as e:
+        logger.error(f"Error in scheduled monitoring job: {e}")
 
 
-def start_scheduler(interval_hours: int = 24):
-    monitor = ComplianceMonitor()
-    monitor.check_all_sites()
+def start_scheduler(interval_hours: int = 24) -> None:
+    """
+    Start the monitoring scheduler.
 
+    Args:
+        interval_hours: Hours between scheduled checks
+    """
+    logger.info(f"Starting scheduler with {interval_hours} hour intervals")
+
+    run_monitor_job()
     schedule.every(interval_hours).hours.do(run_monitor_job)
 
-    logger.info(f"Scheduler started. Checking every {interval_hours} hours.")
+    try:
+        while True:
+            schedule.run_pending()
+    except KeyboardInterrupt:
+        logger.info("Scheduler stopped by user")
 
-    while True:
-        schedule.run_pending()
+
+def main() -> None:
+    """CLI entry point for the monitor."""
+    import sys
+
+    if len(sys.argv) < 2:
+        print("Usage: python monitor.py [check|status|add|remove] [args]")
+        sys.exit(1)
+
+    command = sys.argv[1]
+    monitor = ComplianceMonitor()
+
+    try:
+        if command == "check" and len(sys.argv) > 2:
+            website_url = sys.argv[2]
+            result = monitor.check_single_site(website_url)
+            if result:
+                print(f"Check complete: {result['total_issues']} issues found")
+            else:
+                print(f"Failed to check {website_url}")
+
+        elif command == "check-all":
+            results = monitor.check_all_sites()
+            print(f"Checked {len(results)} sites")
+            for result in results:
+                print(f"  {result['url']}: {result['report']['total_issues']} issues")
+
+        elif command == "status":
+            sites = monitor.get_all_monitored_sites()
+            if sites:
+                print("\nMonitored Sites:")
+                for site in sites:
+                    status_indicator = "✓" if site["status"] == "compliant" else "✗"
+                    print(
+                        f"  {status_indicator} {site['url']}: {site['issue_count']} issues"
+                    )
+            else:
+                print("No sites being monitored. Use 'add' to add a site.")
+
+        elif command == "add" and len(sys.argv) > 3:
+            website_url = sys.argv[2]
+            contact_email = sys.argv[3] if len(sys.argv) > 3 else None
+            site_name = sys.argv[4] if len(sys.argv) > 4 else None
+            monitor.add_site(website_url, site_name, contact_email)
+            print(f"Added {website_url} to monitoring")
+
+        elif command == "remove" and len(sys.argv) > 2:
+            website_url = sys.argv[2]
+            if monitor.remove_site(website_url):
+                print(f"Removed {website_url} from monitoring")
+            else:
+                print(f"Site not found: {website_url}")
+
+        elif command == "history" and len(sys.argv) > 2:
+            website_url = sys.argv[2]
+            days = int(sys.argv[3]) if len(sys.argv) > 3 else 30
+            history = monitor.get_site_history(website_url, days)
+            if history:
+                print(f"\nHistory for {website_url} (last {days} days):")
+                for check in history:
+                    print(f"  {check['checked_at']}: {check['total_issues']} issues")
+            else:
+                print("No history found for this site.")
+        else:
+            print("Usage: python monitor.py [check|status|add|remove|history] [args]")
+
+    except Exception as e:
+        logger.error(f"Error in monitor CLI: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "check":
-            monitor = ComplianceMonitor()
-            monitor.check_all_sites()
-        elif sys.argv[1] == "status":
-            monitor = ComplianceMonitor()
-            sites = monitor.get_all_monitored_sites()
-            for site in sites:
-                print(f"{site['url']}: {site['issue_count']} issues ({site['status']})")
-        elif sys.argv[1] == "add" and len(sys.argv) > 2:
-            url = sys.argv[2]
-            name = sys.argv[3] if len(sys.argv) > 3 else None
-            email = sys.argv[4] if len(sys.argv) > 4 else None
-            monitor = ComplianceMonitor()
-            monitor.add_site(url, name, email)
-        elif sys.argv[1] == "remove" and len(sys.argv) > 2:
-            monitor = ComplianceMonitor()
-            monitor.remove_site(sys.argv[2])
-        else:
-            print("Usage: python monitor.py [check|status|add|remove] [args]")
-    else:
-        print("Usage: python monitor.py [check|status|add|remove] [args]")
+    main()
