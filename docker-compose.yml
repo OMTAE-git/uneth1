@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  ada-compliance:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_DEBUG=false
+      - DATABASE_URL=sqlite:///data/compliance.db
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM}
+      - AUTO_SEND=${AUTO_SEND:-true}
+      - CHECK_INTERVAL_HOURS=${CHECK_INTERVAL_HOURS:-24}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./autonomous.log:/app/autonomous.log
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/status"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+
+  ada-autonomous:
+    build: .
+    command: python src/autonomous_engine.py --interval 24
+    environment:
+      - DATABASE_URL=sqlite:///data/compliance.db
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
+      - SMTP_FROM=${SMTP_FROM}
+      - AUTO_SEND=${AUTO_SEND:-true}
+      - CHECK_INTERVAL_HOURS=${CHECK_INTERVAL_HOURS:-24}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./autonomous.log:/app/autonomous.log
+    restart: unless-stopped
+    depends_on:
+      - ada-compliance
