@@ -23,6 +23,7 @@ from src.scrapers.compliance_checker import ADAComplianceChecker
 from src.letters.letter_generator import LetterGenerator
 from src.monitoring.monitor import ComplianceMonitor
 from src.reports.report_generator import ReportGenerator
+from src.autonomous_engine import AutonomousEngine
 
 
 def check_website_compliance(args: argparse.Namespace) -> None:
@@ -227,6 +228,23 @@ def manage_monitoring(args: argparse.Namespace) -> None:
         print(f"An error occurred: {e}")
 
 
+def run_autonomous(args: argparse.Namespace) -> None:
+    """Run the autonomous compliance engine."""
+    try:
+        engine = AutonomousEngine()
+
+        if args.once:
+            logger.info("Running single autonomous cycle")
+            engine.run_full_cycle()
+        else:
+            logger.info(f"Starting autonomous engine - {args.interval}h cycles")
+            engine.run_continuous(args.interval)
+
+    except Exception as e:
+        logger.error(f"Error in autonomous mode: {e}")
+        print(f"An error occurred: {e}")
+
+
 def generate_compliance_report(args: argparse.Namespace) -> None:
     """
     Generate compliance reports.
@@ -421,6 +439,20 @@ Examples:
     )
     report_parser.add_argument("--output", "-o", help="Output filename")
 
+    auto_parser = subparsers.add_parser(
+        "autonomous", help="Run autonomous compliance engine"
+    )
+    auto_parser.add_argument(
+        "--once", action="store_true", help="Run single cycle and exit"
+    )
+    auto_parser.add_argument(
+        "--interval", type=int, default=24, help="Hours between cycles (default: 24)"
+    )
+    auto_parser.add_argument("--url", type=str, help="Check single URL autonomously")
+    auto_parser.add_argument(
+        "--no-email", action="store_true", help="Don't send emails"
+    )
+
     args = parser.parse_args()
 
     if args.verbose:
@@ -434,6 +466,8 @@ Examples:
         manage_monitoring(args)
     elif args.command == "report":
         generate_compliance_report(args)
+    elif args.command == "autonomous":
+        run_autonomous(args)
     else:
         parser.print_help()
 
