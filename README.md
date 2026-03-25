@@ -1,132 +1,130 @@
-# uneth1 - ADA Compliance Suite
+# ADA Compliance Suite
 
-Automated ADA compliance checking, demand letter generation, and monitoring system for e-commerce websites.
+Automated ADA compliance checking, demand letter generation, and monitoring system.
 
 ## Features
 
-- **Web Scraping & Compliance Checks**: Scan websites for ADA accessibility issues (alt text, keyboard navigation, color contrast, screen reader compatibility)
-- **Automated Letter Generation**: Generate customized demand letters for non-compliant websites
-- **Compliance Monitoring**: Track compliance status over time with scheduled checks
-- **Detailed Reporting**: Generate comprehensive HTML/PDF reports
-
-## Installation
-
-```bash
-pip install -r requirements.txt
-```
+- **Web Scraping & Compliance Checks**: Scan websites for ADA accessibility issues
+- **Automated Letter Generation**: Generate customized demand letters
+- **Compliance Monitoring**: Track compliance status over time
+- **Detailed Reporting**: Generate comprehensive HTML reports
+- **Autonomous Mode**: Fully automated scanning and letter generation
+- **Web Dashboard**: Production-ready Flask dashboard
 
 ## Quick Start
 
-### Check a Website for ADA Compliance
+```bash
+# Install dependencies
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+
+# Check a website
+python cli.py check --url https://example.com
+
+# Run automated engine
+python cli.py autonomous --once --no-email
+```
+
+## CLI Commands
 
 ```bash
 python cli.py check --url https://example.com
-python cli.py check --url https://example.com --json  # JSON output
-python cli.py check --url https://example.com --verbose  # Detailed issues
-```
-
-### Generate a Demand Letter
-
-```bash
-python cli.py letter \
-  --recipient "Business Name" \
-  --email "contact@example.com" \
-  --website "https://example.com" \
-  --check-url "https://example.com" \
-  --sender "Your Name" \
-  --organization "Your Organization"
-```
-
-### Monitor Websites
-
-```bash
-# Add a site to monitoring
-python cli.py monitor --add --url https://example.com --name "Example" --email "contact@example.com"
-
-# Check all monitored sites
-python cli.py monitor --check-all
-
-# View monitoring status
+python cli.py check --url https://example.com --verbose --json
+python cli.py monitor --add --url https://example.com --email you@example.com
 python cli.py monitor --status
+python cli.py letter --recipient "Business" --email "legal@biz.com" --website "https://biz.com"
+python cli.py autonomous --once
+python cli.py autonomous --interval 12  # Run every 12 hours
 ```
 
-### Generate Reports
+## Docker Deployment
 
 ```bash
-# Single site summary report
-python cli.py report --type summary --url https://example.com
+# Configure environment
+cp .env.example .env
+# Edit .env with SMTP credentials
 
-# Progress report
-python cli.py report --type progress --url https://example.com --days 30
+# Build and run
+docker-compose up -d
 
-# Batch report
-python cli.py report --type batch --urls https://site1.com https://site2.com
+# View dashboard
+open http://localhost:5000
+
+# View logs
+docker-compose logs -f ada-autonomous
+```
+
+## Production Deployment
+
+### Docker (Recommended)
+```bash
+docker-compose -f docker-compose.yml up -d
+```
+
+### Manual
+```bash
+pip install -r requirements.txt
+
+# Terminal 1: Web dashboard
+python src/web_dashboard.py
+
+# Terminal 2: Background worker
+python src/autonomous_engine.py --interval 24
+```
+
+## Testing
+
+```bash
+pytest tests/ -v --cov=src
+flake8 src/ --count --select=E9,F63,F7,F82
+```
+
+## Configuration
+
+Create `.env` or set environment variables:
+```bash
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your-email@gmail.com
+SMTP_PASS=your-app-password
+FROM_EMAIL=compliance@example.com
+AUTO_SEND=true
+CHECK_INTERVAL_HOURS=24
+```
+
+## Project Structure
+
+```
+uneth1/
+├── cli.py                     # CLI interface
+├── src/
+│   ├── autonomous_engine.py   # Fully autonomous operation
+│   ├── web_dashboard.py        # Flask web dashboard
+│   ├── config.py               # Configuration classes
+│   ├── scrapers/               # Web scraping
+│   ├── letters/                # Letter generation
+│   ├── monitoring/             # Compliance monitoring
+│   └── reports/                # Report generation
+├── tests/                     # Unit tests
+├── templates/                 # Web templates
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
 ```
 
 ## WCAG Criteria Checked
 
 | Criterion | Description |
 |-----------|-------------|
-| 1.1.1 | Non-text Content - Images must have alt text |
-| 1.3.1 | Info and Relationships - Proper heading structure |
-| 1.4.3 | Contrast (Minimum) - 4.5:1 contrast ratio |
-| 2.1.1 | Keyboard - All functionality accessible via keyboard |
-| 2.4.1 | Bypass Blocks - Skip navigation links |
-| 2.4.2 | Page Titled - Descriptive page titles |
-| 2.4.4 | Link Purpose - Descriptive link text |
-| 2.4.7 | Focus Visible - Visible keyboard focus |
-
-## Project Structure
-
-```
-uneth1/
-├── src/
-│   ├── scrapers/          # Web scraping and compliance checking
-│   ├── letters/           # Letter generation
-│   ├── monitoring/        # Compliance monitoring
-│   ├── reports/           # Report generation
-│   └── utils/             # Utilities
-├── templates/             # Email/letter templates
-├── config/               # Configuration files
-├── data/                 # Database and data storage
-├── output/               # Generated reports and letters
-├── tests/                # Unit tests
-├── cli.py                # Main CLI
-└── requirements.txt      # Python dependencies
-```
-
-## Usage Examples
-
-### Python API
-
-```python
-from src.scrapers.compliance_checker import ADAComplianceChecker
-from src.letters.letter_generator import LetterGenerator
-from src.monitoring.monitor import ComplianceMonitor
-
-# Check a website
-checker = ADAComplianceChecker('https://example.com')
-checker.run_checks()
-report = checker.get_report()
-print(f"Found {report['total_issues']} issues")
-
-# Generate a letter
-letter_gen = LetterGenerator()
-letter = letter_gen.generate_demand_letter(
-    recipient_name="Business Name",
-    recipient_email="contact@example.com",
-    website_url="https://example.com",
-    issues=report['issues']
-)
-
-# Add to monitoring
-monitor = ComplianceMonitor()
-monitor.add_site('https://example.com', 'Example Site', 'contact@example.com')
-```
-
-## Legal Disclaimer
-
-This tool is provided for informational purposes only. It does not constitute legal advice. Users should consult with qualified legal counsel regarding ADA compliance requirements and any legal actions.
+| 1.1.1 | Non-text Content - Alt text |
+| 1.3.1 | Info and Relationships |
+| 1.4.3 | Contrast (Minimum) 4.5:1 |
+| 2.1.1 | Keyboard Accessible |
+| 2.4.1 | Bypass Blocks |
+| 2.4.2 | Page Titled |
+| 2.4.4 | Link Purpose |
+| 2.4.7 | Focus Visible |
 
 ## License
 
