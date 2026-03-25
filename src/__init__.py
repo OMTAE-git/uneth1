@@ -1,7 +1,7 @@
-from .compliance_checker import ADAComplianceChecker
-from .letter_generator import LetterGenerator
-from .monitor import ComplianceMonitor
-from .report_generator import ReportGenerator
+from .scrapers.compliance_checker import ADAComplianceChecker
+from .letters.letter_generator import LetterGenerator
+from .monitoring.monitor import ComplianceMonitor
+from .reports.report_generator import ReportGenerator
 
 __all__ = [
     "ADAComplianceChecker",
